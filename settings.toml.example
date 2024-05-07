@@ -1,0 +1,6 @@
+WIFI_SSID = ""
+WIFI_PASSWORD = ""
+ADAFRUIT_IO_USERNAME = ""
+ADAFRUIT_IO_KEY = ""
+# Timezone names from http://worldtimeapi.org/timezones
+TIMEZONE="Etc/UTC"
