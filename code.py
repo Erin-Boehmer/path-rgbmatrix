@@ -10,8 +10,10 @@ import displayio
 import rgbmatrix
 import framebufferio
 import adafruit_display_text.label
-from adafruit_datetime import datetime
 from displayio import Group
+
+import api.njpath as njpath
+import api.razza as razza
 
 
 # Release any existing displays
@@ -28,22 +30,9 @@ NETWORK_CALL_INTERVAL = 60
 # --- Text Properties ---
 FONT = terminalio.FONT
 GAP_BETWEEN_ARRIVALS = 6
-LINE_NAME_MAP = {
-    "World Trade Center": "WTC",
-    "33rd Street": "33rd"
-}
-LINE_COLOR_MAP = {
-    "World Trade Center": 0xD93A30,
-    "33rd Street": 0xFF9900
-}
-
-# Initialize the main display group
-line_name_group = Group()
-
-# Initialize the arrival time group (this remains static on the display)
-arrival_time_group = Group()
 
 # --- Matrix setup ---
+display_group = Group()
 
 displayio.release_displays()
 
@@ -88,130 +77,57 @@ wifi.radio.connect(
 )
 print(f"Connected to {os.getenv('WIFI_SSID')}")
 
-# --- Adafruit time API setup ---
-ADAFRUIT_IO_USERNAME = os.getenv("ADAFRUIT_IO_USERNAME")
-ADAFRUIT_IO_KEY = os.getenv("ADAFRUIT_IO_KEY")
-TZ = os.getenv("TIMEZONE")
-
 # --- Networking setup ---
 context = ssl.create_default_context()
 pool = socketpool.SocketPool(wifi.radio)
 requests = adafruit_requests.Session(pool, context)
 
 
-def get_current_time():
-    base_url = f"https://io.adafruit.com/api/v2/{ADAFRUIT_IO_USERNAME}/integrations/time/strftime"
-    query= f"?x-aio-key={ADAFRUIT_IO_KEY}&tz={TZ}"
-    format = "&fmt=%25Y-%25m-%25d+%25H%3A%25M%3A%25S"
+def fetch_data():
 
-    full_url = f"{base_url}{query}{format}"
-    response = requests.get(full_url)
-    iso_string = response.text.replace(" ", "T")
-    current_time = datetime.fromisoformat(iso_string)
+    data = None
 
-    return current_time
+    try:
+        data = njpath.fetch_data(requests)
+        print(f"Data retrieved from NJPath API: {data}")
+    except:
+        data = razza.fetch_data(requests)
+        print(f"Data retrieved from Razza API: {data}")
 
-def fetch_path_train_data():
-    print("Running fetch_path_train_data")
-
-    url = "https://path.api.razza.dev/v1/stations/grove_street/realtime"
-
-    headers = {
-        "Accept": "application/json; charset=UTF-8",
-    }
-    response = requests.get(url, headers=headers)
-
-    if response.status_code == 200:
-        json_response = response.json()  # Parse JSON only once
-        return process_path_train_data(json_response)  # Process flights and return
-    else:
-        print(f"Request failed with status code {response.status_code}")
-        if response.content:
-            print(f"Response content: {response.content}")
-        return []
+    return data
 
 
-def process_path_train_data(json_data):
-    # Initialize an empty list to hold processed flight data
-    ny_bound_train_arrivals = []
-
-    for arrival in json_data.get("upcomingTrains", []):
-        # Use 'get' with default values to avoid KeyError
-        arrival_details = {
-            "lineName": arrival.get("lineName", "-"),
-            "direction": arrival.get("direction", "-"),
-            "projectedArrival": arrival.get("projectedArrival", "-").replace("Z", ""),
-            "lastUpdated": arrival.get("lastUpdated", "-"),
-            "status": arrival.get("status", "-"),
-        }
-        # Only add train if NY bound and not '-'
-        if arrival_details["direction"] == "TO_NY":
-            ny_bound_train_arrivals.append(arrival_details)
-
-    return ny_bound_train_arrivals
-
-
-def create_line_name_labels(path_train_data, y_positions):
+def create_line_name_labels(data, y_positions):
     line_name_labels = []
 
-    for i, arrival in enumerate(path_train_data):
+    for i, arrival in enumerate(data):
         y_position = y_positions[i]
 
-        lineName = arrival.get("lineName", "-")
-        status = arrival.get("status", "-")
-        color = LINE_COLOR_MAP.get(lineName, 0xc2c2c2)
-
-        # Shorten line names for display
-        lineName = LINE_NAME_MAP.get(lineName, lineName)
-
-        # Only include the status if not ON_TIME or null
-        if status in ["ON_TIME", "-"]:
-            status = ""
-        else:
-            status = f" ({status})"
-
-        display_text = f"{lineName}{status}"
         text_label = adafruit_display_text.label.Label(
-                FONT, color=color, x=3, y=y_position, text=display_text
+                FONT, color=arrival["color"], x=3, y=y_position, text=arrival["line"]
             )
         line_name_labels.append(text_label)
 
     return line_name_labels
 
-def create_arrival_time_labels(path_train_data, y_positions):
+def create_arrival_time_labels(data, y_positions):
     arrival_time_labels = []
 
-    for i, arrival in enumerate(path_train_data):
+    for i, arrival in enumerate(data):
         y_position = y_positions[i]
 
-
-        arrival_time = arrival.get("projectedArrival", "-")
-        lineName = arrival.get("lineName", "-")
-        color = LINE_COLOR_MAP.get(lineName, 0xc2c2c2)
-
-        current_time = get_current_time()
-        minutes_to_arrival = "-"
-
-        if arrival_time != "-":
-            arrival_time = datetime.fromisoformat(arrival_time)
-
-            minutes_to_arrival = (arrival_time - current_time).total_seconds() // 60
-
         text_label = adafruit_display_text.label.Label(
-            FONT, color=color, x=44, y=y_position, text=f"{minutes_to_arrival}m"
+            FONT, color=arrival["color"], x=44, y=y_position, text=arrival["projectedArrival"]
         )
         arrival_time_labels.append(text_label)
 
     return arrival_time_labels
 
-def update_display(path_train_data, line_name_group, arrival_time_group):
-    # Clear previously displayed line names
-    while len(line_name_group):
-        line_name_group.pop()
+def update_display(path_train_data, display_group):
+    # Clear previously displayed arrival information
+    while len(display_group):
+        display_group.pop()
 
-    # Clear previously displayed arrival times
-    while len(arrival_time_group):
-        arrival_time_group.pop()
     # Calculate the y position for each of 2 (static) NYC bound arrivals
     y_positions = [
         GAP_BETWEEN_ARRIVALS + DISPLAY_HEIGHT // 2 * i
@@ -222,49 +138,42 @@ def update_display(path_train_data, line_name_group, arrival_time_group):
     arrival_time_labels = create_arrival_time_labels(path_train_data, y_positions)
 
     for l in line_name_labels:
-        line_name_group.append(l)
+        display_group.append(l)
 
     for a in arrival_time_labels:
-        arrival_time_group.append(a)
+        display_group.append(a)
 
-    line_name_group.append(arrival_time_group)
+    display.root_group = display_group
 
-    # Show the updated group on the display
-    display.root_group = line_name_group
     return line_name_labels
 
-
 def display_no_arrivals():
-    # Clear the previous group content
-    while len(line_name_group):
-        line_name_group.pop()
-
-    while len(arrival_time_group):
-        arrival_time_group.pop()
+    # Clear previously displayed arrival information
+    while len(display_group):
+        display_group.pop()
 
     # Create a label for "Looking for arrivals..."
     checking_label = adafruit_display_text.label.Label(
         FONT, color=0xc7c7c7, text="Waiting on", x=0, y=6
     )
-    razza_label = adafruit_display_text.label.Label(
+    api_label = adafruit_display_text.label.Label(
         FONT, color=0xc7c7c7, text="PATH api", x=0, y=20
     )
 
-    line_name_group.append(checking_label)
-    line_name_group.append(razza_label)
+    display_group.append(checking_label)
+    display_group.append(api_label)
 
     # Update the display with the new group
-    display.root_group = line_name_group
+    display.root_group = display_group
 
 
 display_no_arrivals()
 
-path_train_data = fetch_path_train_data()
+path_train_data = fetch_data()
 
-# Check if we received any flight data
 if path_train_data:
-    flight_data_labels = update_display(
-        path_train_data, line_name_group, arrival_time_group
+    update_display(
+        path_train_data, display_group
     )
 
 last_network_call_time = time.monotonic()
@@ -277,13 +186,11 @@ while True:
     # Check if NETWORK_CALL_INTERVAL seconds have passed
     if (current_time - last_network_call_time) >= NETWORK_CALL_INTERVAL:
         print("Fetching new path train data...")
-        path_train_data = fetch_path_train_data()
+        path_train_data = fetch_data()
 
         if path_train_data:
             # If PATH train arrival data is found, update the display with it
-            new_text_labels = update_display(
-                path_train_data, line_name_group, arrival_time_group
-            )
+            new_text_labels = update_display(path_train_data, display_group)
 
             # Keep API ping at 60 seconds. All is working.
             NETWORK_CALL_INTERVAL = 60
